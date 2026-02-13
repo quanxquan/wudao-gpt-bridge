@@ -2,7 +2,6 @@ flask
 flask-cors
 requests
 datasets
-huggingface-hub
 fsspec
 aiohttp
 gunicorn
