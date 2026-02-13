@@ -4,52 +4,71 @@ import requests
 import logging
 from flask import Flask, jsonify
 from flask_cors import CORS
-from modelscope.hub.api import HubApi
+from datasets import load_dataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+# 彻底放开跨域，确保 Lovable 预览和未来的 Cloudflare 部署都能通
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-api = HubApi()
+# 从 GCP 环境变量读取配置
+API_BASE = os.environ.get('OPENAI_API_BASE', 'https://api.haojs.uk/v1')
+API_KEY = os.environ.get('OPENAI_API_KEY')
+MODEL = os.environ.get('MODEL_NAME', 'gpt-oss-120b')
 
-# 尝试更换为维护更好的数据集
-DATASET_ID = os.environ.get('DATASET_ID', 'LLM-Research/ChiS_Chinese_Common_Crawl')
+def ask_ai(content):
+    """请求你的自建 120b API"""
+    if not API_KEY: 
+        return "AI 配置未完成，请检查 GCP 环境变量。"
+    try:
+        url = f"{API_BASE}/chat/completions"
+        payload = {
+            "model": MODEL,
+            "messages": [
+                {"role": "system", "content": "你是一位资深互联网考古学家，请分析这段语料的年代感、社会背景及文风特征。"},
+                {"role": "user", "content": f"考古目标：\n\n{content}"}
+            ]
+        }
+        res = requests.post(url, json=payload, headers={"Authorization": f"Bearer {API_KEY}"}, timeout=25)
+        return res.json()['choices'][0]['message']['content']
+    except Exception as e:
+        return f"AI 分析暂不可用: {str(e)}"
 
 @app.route('/get_random')
 def get_random():
     try:
-        # 1. 只获取文件列表
-        files = api.get_dataset_files(dataset_id=DATASET_ID, revision='master')
-        # 过滤出 jsonl 或 txt 文件
-        data_files = [f for f in files if f.endswith(('.jsonl', '.txt', '.json'))]
+        # 使用流式加载，针对 TXT 版本的悟道 2.0
+        # 这种方式不会下载整个 60G，而是只抓取一小段
+        dataset = load_dataset("mdokl/WuDaoCorpora2.0-RefinedEdition60GTXT", split="train", streaming=True)
         
-        if not data_files:
-            return jsonify({"status": "error", "message": "未找到有效语料文件"}), 404
-            
-        target_file = random.choice(data_files)
+        # 随机跳过 0-5000 条来模拟真随机
+        shuffled_dataset = dataset.skip(random.randint(0, 5000))
+        item = next(iter(shuffled_dataset))
         
-        # 2. 获取文件的直链（绕过 MsDataset 加载器）
-        file_url = f"https://modelscope.cn/api/v1/datasets/{DATASET_ID}/repo/temp?FilePath={target_file}"
+        # TXT 格式通常直接在 'text' 字段中
+        content = item.get('text', '') or item.get('content', '内容获取失败')
+        clean_content = content[:1200] # 截取前 1200 字，保证前端展示美观
         
-        # 3. 抓取部分内容
-        # 使用 Stream 模式只读前 50KB，防止内存溢出
-        response = requests.get(file_url, stream=True, timeout=10)
-        content_chunk = response.raw.read(50000).decode('utf-8', errors='ignore')
+        # 联动分析
+        analysis = ask_ai(clean_content)
         
-        # 简单的清洗：取中间的一段，防止取到文件头的元数据
-        lines = content_chunk.split('\n')
-        final_content = lines[len(lines)//2] if len(lines) > 2 else content_chunk
-
         return jsonify({
             "status": "success",
-            "content": final_content[:2000],
-            "meta": {"source": target_file, "dataset": DATASET_ID}
+            "content": clean_content,
+            "analysis": analysis,
+            "meta": {
+                "source": "HuggingFace/WuDao2.0-Refined",
+                "model": MODEL
+            }
         })
     except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        return jsonify({"status": "error", "message": f"挖掘失败: {str(e)}"}), 500
+        logger.error(f"HF Error: {str(e)}")
+        return jsonify({
+            "status": "error", 
+            "message": f"挖掘深度不足，请重试: {str(e)}"
+        }), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
