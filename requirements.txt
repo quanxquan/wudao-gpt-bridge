@@ -1,5 +1,7 @@
 flask
 flask-cors
-modelscope
 requests
+datasets
+fsspec
+aiohttp
 gunicorn
