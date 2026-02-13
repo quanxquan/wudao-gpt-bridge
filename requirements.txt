@@ -1,7 +1,6 @@
 flask
 flask-cors
 requests
-datasets
-fsspec
-aiohttp
+pandas
+pyarrow
 gunicorn
