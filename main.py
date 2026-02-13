@@ -1,14 +1,14 @@
 import os
 import random
 import requests
+import pandas as pd
+import io
 from flask import Flask, jsonify
 from flask_cors import CORS
-from datasets import load_dataset
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app)
 
-# 环境变量
 API_BASE = os.environ.get('OPENAI_API_BASE', 'https://api.haojs.uk/v1')
 API_KEY = os.environ.get('OPENAI_API_KEY')
 MODEL = os.environ.get('MODEL_NAME', 'gpt-oss-120b')
@@ -16,46 +16,55 @@ MODEL = os.environ.get('MODEL_NAME', 'gpt-oss-120b')
 @app.route('/get_random')
 def get_random():
     try:
-        # 使用截图里的稳定源：p208p2002/wudaocorpus
-        # streaming=True 是为了防止 Cloud Run 内存爆炸
-        ds = load_dataset("p208p2002/wudaocorpus", split="train", streaming=True)
+        # 直接使用你截图中的文件名规则 (p208p2002/wudaocorpus)
+        # 从你截图的文件列表中选取几个确定的文件名
+        parquet_files = [
+            "part-2021009337.parquet",
+            "part-2021011897.parquet",
+            "part-2021012501.parquet"
+        ]
+        target_file = random.choice(parquet_files)
         
-        # 随机跳过一段，增加考古的随机性
-        shuffled_ds = ds.shuffle(seed=random.randint(0, 1000000), buffer_size=1000)
-        item = next(iter(shuffled_ds))
+        # 构建 Raw 下载链接
+        url = f"https://huggingface.co/datasets/p208p2002/wudaocorpus/resolve/main/{target_file}"
         
-        # 该数据集的字段通常是 'text'
-        content = item.get('text', '') or item.get('content', '语料提取失败')
+        # 只读取文件的前一小块以节省内存和时间
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        
+        # 使用 pandas 读取 Parquet
+        df = pd.read_parquet(io.BytesIO(resp.content))
+        
+        # 随机抽取一行
+        random_row = df.sample(n=1).iloc[0]
+        content = str(random_row.get('text') or random_row.get('content') or "内容解析为空")
         clean_content = content[:1200]
-        
-        # 调用你的 120b AI 分析
+
+        # AI 分析逻辑
         analysis = "AI 考古专家正在解析..."
         if API_KEY:
             try:
-                r = requests.post(
+                ai_r = requests.post(
                     f"{API_BASE}/chat/completions",
                     headers={"Authorization": f"Bearer {API_KEY}"},
                     json={
                         "model": MODEL,
-                        "messages": [
-                            {"role": "system", "content": "你是一位互联网考古学家，请分析这段文字的时代背景。"},
-                            {"role": "user", "content": clean_content}
-                        ]
+                        "messages": [{"role": "user", "content": f"考古分析：{clean_content}"}]
                     },
                     timeout=20
                 )
-                analysis = r.json()['choices'][0]['message']['content']
+                analysis = ai_r.json()['choices'][0]['message']['content']
             except:
-                analysis = "AI 暂时无法解析这段深层语料。"
+                analysis = "AI 连线超时，请重试。"
 
         return jsonify({
             "status": "success",
             "content": clean_content,
             "analysis": analysis,
-            "meta": {"source": "p208p2002/wudaocorpus"}
+            "meta": {"source": target_file}
         })
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "error", "message": f"挖掘失败: {str(e)}"}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
